@@ -27,10 +27,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Ignorar DeprecationWarning
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 # ---------------- CONFIG ----------------------------------------------------
-#BASE_DIR = Path(r"C:\Users\ofici\OneDrive\ESCRITORIO IBERDROLA\PROGRAMACION\Proyecto_Check_Altas")
-BASE_DIR = Path(r"C:\Users\X\OneDrive\ESCRITORIO IBERDROLA\PROGRAMACION\Proyecto_Check_Altas")
+BASE_DIR = Path(r"C:\Users\ofici\OneDrive\ESCRITORIO IBERDROLA\PROGRAMACION\Proyecto_Check_Altas")
+#BASE_DIR = Path(r"C:\Users\X\OneDrive\ESCRITORIO IBERDROLA\PROGRAMACION\Proyecto_Check_Altas")
 SRC_XLS  = BASE_DIR / "2025_TRAMITACION_DE_ALTAS.xlsx"
 
 
@@ -77,15 +76,6 @@ def sin_tildes(txt):
 
 raw.columns = [sin_tildes(col).upper().strip() for col in raw.columns]
 
-
-# ─── Normaliza identificadores de contrato / cliente ──────────────────────
-for col_norm in ["CUPS", "DNI/CIF"]:
-    if col_norm in raw.columns:
-        raw[col_norm] = (raw[col_norm].astype(str)
-                                   .str.upper().str.strip()
-                                   .str.replace(r"\s+", "", regex=True))
-
-
 # ─── Renombra columnas erróneas (por si aparece mal escrito) ───────────────
 raw.rename(columns={
     "CODIGO COMERCIAL": "CODIGO COMERCIAL",
@@ -103,7 +93,7 @@ for c in ["PUNTO ATENCION","SERVICIOS","COMUNIDAD","OFERTA PRESENTADA","COLABORA
     raw[c] = raw[c].astype(str).str.upper().str.strip().str.replace(r"\s+", " ", regex=True)
 
 
-# ─── Anexar CAIDAS de TRAMITACION (cuentan como BAJAS CAIDAS_FECHA_PASADA) ──────────
+# ─── Anexar CAIDAS de TRAMITACION (cuentan como BAJAS secundarias) ──────────
 try:
     wb_tmp  = load_workbook(SRC_XLS, read_only=True)
     sheets  = wb_tmp.sheetnames
@@ -127,13 +117,8 @@ try:
                                        .str.replace(r"\s+", " ", regex=True))
 
     # sólo filas con fecha en CAIDAS → son las BAJAS
-    
-    mask_baja_tram = (
-        (df_tram["CAIDAS_E_Y_G"].notna() if "CAIDAS_E_Y_G" in df_tram.columns else False) |
-        (df_tram["CAIDAS_P&S"].notna()   if "CAIDAS_P&S"   in df_tram.columns else False)
-    )
-    df_tram = df_tram[mask_baja_tram]
-
+    df_tram["CAIDAS"] = pd.to_datetime(df_tram["CAIDAS"], errors="coerce")
+    df_tram = df_tram[df_tram["CAIDAS"].notna()]
 
     # alinea columnas que falten / sobren y concatena
     for c in raw.columns.difference(df_tram.columns):
@@ -155,13 +140,10 @@ mask_plan_invalid     = raw['PLAN'].str.upper().isin(['BJ', 'OTROS'])
 mask_serv_ok          = raw['SERVICIOS'].str.upper().str.strip().ne('NO') & raw['SERVICIOS'].notna()
 mask_valida_para_alta = ~mask_plan_invalid | mask_serv_ok
 
-
+from pandas._libs.tslibs.timestamps import Timestamp
+raw.loc[~raw["CAIDAS"].apply(lambda x: isinstance(x, Timestamp)), "CAIDAS"] = pd.NaT
 raw.loc[~raw["FECHA ALTA"].apply(lambda x: isinstance(x, Timestamp)), "FECHA ALTA"] = pd.NaT
 raw["FECHA FIRMA"] = pd.to_datetime(raw["FECHA FIRMA"], errors="coerce")
-for col in ["CAIDAS_E_Y_G", "CAIDAS_P&S"]:
-    if col in raw.columns:
-        raw[col] = pd.to_datetime(raw[col], errors="coerce")
-        raw.loc[~raw[col].apply(lambda x: isinstance(x, Timestamp)), col] = pd.NaT
 
 # -------------- DATES -------------------------------------------------------
 if len(sys.argv) >= 3:
@@ -175,14 +157,9 @@ else:
 HOY = pd.to_datetime(datetime.today().date())       
 
 mask_firma = raw["FECHA FIRMA"].between(d_ini, d_fin, "both")
-
-mask_caida_plan = raw["CAIDAS_E_Y_G"].between(d_ini, HOY, "both") if "CAIDAS_E_Y_G" in raw.columns else False
-mask_caida_serv = raw["CAIDAS_P&S"].between(d_ini, HOY, "both")   if "CAIDAS_P&S"   in raw.columns else False
-mask_caida_any  = mask_caida_plan | mask_caida_serv
-mask_no_caida = (
-    (raw["CAIDAS_E_Y_G"].isna() if "CAIDAS_E_Y_G" in raw.columns else True) &
-    (raw["CAIDAS_P&S"].isna()   if "CAIDAS_P&S"   in raw.columns else True)
-)
+mask_caida = raw["CAIDAS"].between(d_ini, HOY, "both")
+mask_alta_null  = raw["FECHA ALTA"].isna()
+mask_caida_null = raw["CAIDAS"].isna()
 
 
 # ── Recupera texto original de FECHA ALTA ────────────────────────────────
@@ -195,78 +172,19 @@ raw["_FALTA_ORIG_DT"] = pd.to_datetime(
 )
 
 
-ALTAS = raw[mask_firma & mask_no_caida & mask_valida_para_alta]
+ALTAS = raw[mask_firma & raw["CAIDAS"].isna() & mask_valida_para_alta]
 
 mask_incid = (
-    mask_firma & mask_no_caida &
-    raw["FECHA ALTA"].isna() &
-    raw["_FALTA_ORIG_DT"].isna() &
-    raw["FECHA ALTA ORIGINAL"].notna() &
-    mask_valida_para_alta
+    mask_firma
+    & raw["CAIDAS"].isna()
+    & raw["FECHA ALTA"].isna()
+    & raw["_FALTA_ORIG_DT"].isna()
+    & raw["FECHA ALTA ORIGINAL"].notna()
+    & mask_valida_para_alta
 )
 INCID = raw[mask_incid]
 
-BAJAS = raw[mask_caida_any & mask_valida_para_alta]
-
-
-# --- elimina duplicados funcionales antes de resumir ---------------------
-if "CUPS" in raw.columns:
-    DEDUP_KEYS = ["COLABORADOR", "PLAN", "CUPS"]
-elif "DNI/CIF" in raw.columns:
-    DEDUP_KEYS = ["COLABORADOR", "PLAN", "DNI/CIF"]
-else:                          # último recurso
-    DEDUP_KEYS = ["COLABORADOR", "PLAN"]
-
-# --- elimina duplicados dentro de raw -----------------------------------
-raw = raw.drop_duplicates(subset=DEDUP_KEYS, keep="first")
-
-# ─── Elimina clones exactos de BAJAS ──────────────────────────────────────
-ALTAS = ALTAS.drop_duplicates(subset=DEDUP_KEYS, keep="first")
-BAJAS = BAJAS.drop_duplicates(subset=DEDUP_KEYS, keep="first")
-INCID = INCID.drop_duplicates(subset=DEDUP_KEYS, keep="first")
-
-#  ➜  SEPARO las caídas de contrato (E&G) y las de servicios
-BAJAS_PLAN = BAJAS[BAJAS["CAIDAS_E_Y_G"].notna()].copy()
-BAJAS_SERV = BAJAS[BAJAS["CAIDAS_P&S"].notna()].copy()
-
-#  ➜  Fechas para CAIDAS_FECHA_PASADA
-SEC_PLAN = BAJAS_PLAN[BAJAS_PLAN["FECHA FIRMA"] < d_ini]
-SEC_SERV = BAJAS_SERV[BAJAS_SERV["FECHA FIRMA"] < d_ini]
-
-# ---------------------------------------------------------------------------
-#  BLOQUE NUEVO → gestión unificada de duplicados
-# -------------------------------------------------------------------------
-def build_subset(df, extra_cols=None):
-    """
-    Construye la lista de columnas a usar para detectar duplicados
-    (solo incluye las que existan realmente en el DataFrame).
-    """
-    subset = ["COLABORADOR", "PLAN"]
-    subset.append("CUPS" if "CUPS" in df.columns else "DNI/CIF")
-    if extra_cols:
-        subset.extend(c for c in extra_cols if c in df.columns)
-    return subset
-
-def dedup(df, extra_cols=None):
-    """Elimina duplicados según la clave devuelta por build_subset()."""
-    return df.drop_duplicates(subset=build_subset(df, extra_cols), keep="first")
-
-# ---------- eliminamos duplicados en cada tabla ---------------------------
-ALTAS = dedup(ALTAS, extra_cols=["FECHA FIRMA"])
-BAJAS = dedup(BAJAS, extra_cols=["CAIDAS_E_Y_G", "CAIDAS_P&S"])
-INCID = dedup(INCID, extra_cols=["FECHA FIRMA"])
-
-# ---------- (opcional) guardamos posibles duplicados detectados -----------
-dup_altas = ALTAS[ALTAS.duplicated(build_subset(ALTAS, ["FECHA FIRMA"]), keep=False)]
-dup_bajas = BAJAS[BAJAS.duplicated(build_subset(BAJAS, ["CAIDAS_E_Y_G", "CAIDAS_P&S"]), keep=False)]
-dup_inci  = INCID[INCID.duplicated(build_subset(INCID, ["FECHA FIRMA"]), keep=False)]
-
-if not dup_altas.empty or not dup_bajas.empty or not dup_inci.empty:
-    with pd.ExcelWriter(BASE_DIR / "duplicados_en_altas_bajas.xlsx") as w:
-        if not dup_altas.empty: dup_altas.to_excel(w, "ALTAS", index=False)
-        if not dup_bajas.empty: dup_bajas.to_excel(w, "BAJAS", index=False)
-        if not dup_inci.empty:  dup_inci.to_excel(w, "INCID", index=False)
-    print("ℹ️  Se han eliminado duplicados; detalle en duplicados_en_altas_bajas.xlsx")
+BAJAS = raw[mask_caida & mask_valida_para_alta]
 
 # -------------- TOTAL_GLOBAL ------------------------------------------------
 rows = []
@@ -291,50 +209,39 @@ def is_lena(df):
 def is_pymes(df):
     return df["CODIGO COMERCIAL"].isin(P_CODE) & df["PLAN"].isin(["2,0 TD_3", "3,0 TD"])
 
-def add(tipo, df_a, df_b, df_sec):
-    # ── cifras base ───────────────────────────────────────────────
-    bajas_norm   = df_b.shape[0] - df_sec.shape[0]          # BAJAS reales del rango
-    caidas_pas   = df_sec.shape[0]                          # firma < d_ini -> caída dentro
-    no_ast       = df_a[df_a["COMUNIDAD"] != "ASTURIAS"].shape[0]
-
+def add(tipo, df_a, df_b):
     rows.append({
         "TIPO": tipo,
-        "ALTAS":  df_a.shape[0],
-        "BAJAS":  bajas_norm,                              
-        "CAIDAS_FECHA_PASADA": caidas_pas,
-        "NO_ASTURIAS": no_ast,
-        "TOTALES": df_a.shape[0] - bajas_norm - caidas_pas - no_ast,
-
-        # ---- desglose por sede ----------------------------------
-        "ALTAS_LENA":   df_a[is_lena(df_a)].shape[0],
-        "BAJAS_LENA":   df_b[is_lena(df_b)].shape[0] - df_sec[is_lena(df_sec)].shape[0],
+        "ALTAS": df_a.shape[0],
+        "BAJAS": df_b.shape[0],
+        "NO_ASTURIAS": df_a[df_a["COMUNIDAD"]!="ASTURIAS"].shape[0],
+        "TOTALES": df_a.shape[0] - df_b.shape[0] - df_a[df_a["COMUNIDAD"]!="ASTURIAS"].shape[0],
+        "ALTAS_LENA": df_a[is_lena(df_a)].shape[0],
+        "BAJAS_LENA": df_b[is_lena(df_b)].shape[0],
         "ALTAS_MIERES": df_a[is_mieres(df_a)].shape[0],
-        "BAJAS_MIERES": df_b[is_mieres(df_b)].shape[0] - df_sec[is_mieres(df_sec)].shape[0],
-        "ALTAS_PYMES":  df_a[is_pymes(df_a)].shape[0],
-        "BAJAS_PYMES":  df_b[is_pymes(df_b)].shape[0] - df_sec[is_pymes(df_sec)].shape[0],
-    })
+        "BAJAS_MIERES": df_b[is_mieres(df_b)].shape[0],
+        "ALTAS_PYMES": df_a[is_pymes(df_a)].shape[0],
+        "BAJAS_PYMES": df_b[is_pymes(df_b)].shape[0],
 
+    })
 
 
 for p in PLANES:
     add(p,
         ALTAS[ALTAS["PLAN"].str.startswith(p,na=False)],
-        BAJAS[BAJAS["PLAN"].str.startswith(p,na=False)],
-        SEC_PLAN[SEC_PLAN["PLAN"].str.startswith(p, na=False)]
+        BAJAS[BAJAS["PLAN"].str.startswith(p,na=False)]
     )
 add("Plan Exclusivo 10%",
     ALTAS[contains(ALTAS["OFERTA PRESENTADA"], [OFERTA])],
-    BAJAS[contains(BAJAS["OFERTA PRESENTADA"], [OFERTA])],
-    SEC_PLAN[contains(SEC_PLAN["OFERTA PRESENTADA"], [OFERTA])]
+    BAJAS[contains(BAJAS["OFERTA PRESENTADA"], [OFERTA])]
 )
 for k,toks in SERVS.items():
     add(k,
         ALTAS[contains(ALTAS["SERVICIOS"], toks)],
-        BAJAS_SERV[contains(BAJAS_SERV["SERVICIOS"], toks)],
-        SEC_SERV[contains(SEC_SERV["SERVICIOS"], toks)]
+        BAJAS[contains(BAJAS["SERVICIOS"], toks)]
     )
 
-add("ALTAS CON INCIDENCIA", INCID, INCID, INCID.iloc[0:0])
+add("ALTAS CON INCIDENCIA", INCID, INCID)
 
 
 
@@ -342,21 +249,17 @@ total_global = pd.DataFrame(rows)
 print(total_global[["TIPO","ALTAS","BAJAS"]])
 
 # -------------- POR_COLAB ---------------------------------------------------
-
 plan_alt = (
     ALTAS[ALTAS["PLAN"].isin(PLANES)]
     .groupby(["COLABORADOR","PLAN"]).size()
     .unstack(fill_value=0).reindex(columns=PLANES, fill_value=0)
 )
-
-plan_alt.columns = [f"PLAN_{c}_ALTA"  for c in plan_alt.columns]
-
-# ─── BAJAS de PLAN (solo las de contrato) ─────────────────────────────
 plan_baj = (
-    BAJAS_PLAN[BAJAS_PLAN["PLAN"].isin(PLANES)]
-    .groupby(["COLABORADOR", "PLAN"]).size()
+    BAJAS[BAJAS["PLAN"].isin(PLANES)]
+    .groupby(["COLABORADOR","PLAN"]).size()
     .unstack(fill_value=0).reindex(columns=PLANES, fill_value=0)
 )
+plan_alt.columns = [f"PLAN_{c}_ALTA"  for c in plan_alt.columns]
 plan_baj.columns = [f"PLAN_{c}_CAIDA" for c in plan_baj.columns]
 
 serv_alt = ALTAS.groupby("COLABORADOR").apply(
@@ -365,15 +268,11 @@ serv_alt = ALTAS.groupby("COLABORADOR").apply(
         for k,toks in SERVS.items()
     })
 )
-
-# ─── BAJAS de SERVICIOS (solo las de P&S) ─────────────────────────────
-serv_baj = (
-    BAJAS_SERV
-    .groupby("COLABORADOR")
-    .apply(lambda df: pd.Series({
+serv_baj = BAJAS.groupby("COLABORADOR").apply(
+    lambda df: pd.Series({
         f"SERVICIO_{k}_CAIDA": contains(df["SERVICIOS"], toks).sum()
-        for k, toks in SERVS.items()
-    }))
+        for k,toks in SERVS.items()
+    })
 )
 
 of_alt = (ALTAS[contains(ALTAS["OFERTA PRESENTADA"],[OFERTA])]
@@ -448,9 +347,8 @@ for sh in ["POR_COLABORADOR","TOTAL_GLOBAL"]:
         # Crear leyenda con formato protegido
         legend_lines = [
             "LEYENDA:",
-            "• 🔼 ALTA: Firma dentro del período y fecha de CAÍDA vacía.",
-            "• 🔽 BAJA: Fecha de CAÍDAS dentro del período (independiente de la alta).",
-            "• 🔙 CAIDAS_FECHA_PASADA: Son las caídas cuya fecha de firma es anterior a la fecha de inicio pero su caída está en ese rango.",
+            "• 🔼 *ALTA*: Firma dentro del período y fecha de CAÍDA vacía.",
+            "• 🔽 *BAJA*: Fecha de CAÍDAS dentro del período (independiente de la alta).",
             "• ⚠️ *INCIDENCIA*: Firma dentro del período sin alta válida ni caída.",
             "ℹ️ *RECUERDA*: Las altas con incidencia (RECHAZO, T/A, etc.) se muestran en amarillo y no cuentan como altas ni como bajas."
         ]
@@ -518,8 +416,6 @@ for sh in ["POR_COLABORADOR","TOTAL_GLOBAL"]:
                     c.fill = fills["alta_loc"]
                 elif hdr_txt and hdr_txt.startswith("BAJAS_"):
                     c.fill = fills["baja"]
-              
-    
 
     auto_width(ws)
     
@@ -556,11 +452,11 @@ if resp == 'S':
         ignore_index=True
     )
     df_extra.columns = [sin_tildes(c).upper().strip() for c in df_extra.columns]
-    for c in ["FECHA FIRMA", "FECHA ALTA", "CAIDAS_E_Y_G", "CAIDAS_P&S"]:
+    for c in ["FECHA FIRMA", "FECHA ALTA", "CAIDAS"]:
         df_extra[c] = pd.to_datetime(df_extra[c], errors="coerce")
 
     df_tram = pd.concat([df_tram, df_extra], ignore_index=True)
-    for c in ["FECHA FIRMA", "FECHA ALTA", "CAIDAS_E_Y_G", "CAIDAS_P&S"]:
+    for c in ["FECHA FIRMA", "FECHA ALTA", "CAIDAS"]:
         df_tram[c] = pd.to_datetime(df_tram[c], errors="coerce")
 
     # ------------------------------------------------- MÁSCARAS BASE -----------------------------------------------
@@ -585,7 +481,7 @@ if resp == 'S':
     cols = [
         "INDICE","COLABORADOR","NOMBRE DEL CLIENTE","DNI/CIF",
         "PLAN","POTENCIA","OFERTA PRESENTADA","SERVICIOS",
-        "FECHA FIRMA","FECHA ALTA","OBSERV.","CAIDAS_E_Y_G","CAIDAS_P&S","CHECK ALTAS",
+        "FECHA FIRMA","FECHA ALTA","OBSERV.","CAIDAS","CHECK ALTAS",
         "VIENE GRACIAS A :","OTROS"
     ]
 
@@ -593,15 +489,11 @@ if resp == 'S':
         nombre = re.sub(r"[\\/?*\[\]]","_", str(col).strip()[:31])
 
         m_col  = df_tram["COLABORADOR"].astype(str).str.strip().str.upper() == str(col).strip().upper()
-        no_caida_tram = df_tram["CAIDAS_E_Y_G"].isna() & df_tram["CAIDAS_P&S"].isna()
-        m_alta = df_tram["FECHA FIRMA"].between(d_ini, d_fin, "both") & no_caida_tram & mask_valida
-        m_baja = (df_tram["CAIDAS_E_Y_G"].between(d_ini, d_fin, "both") | df_tram["CAIDAS_P&S"].between(d_ini, d_fin, "both")) & mask_valida
+        m_alta = df_tram["FECHA FIRMA"].between(d_ini, d_fin, "both") & df_tram["CAIDAS"].isna() & mask_valida
+        m_baja = df_tram["CAIDAS"].between(d_ini, d_fin, "both") & mask_valida
         m_inci = m_alta & df_tram["FECHA ALTA"].isna()
-        m_sec  = (df_tram["FECHA FIRMA"] < d_ini) & (
-            df_tram["CAIDAS_E_Y_G"].between(d_ini, hoy, "both") |
-            df_tram["CAIDAS_P&S"].between(d_ini, hoy, "both")
-         ) & mask_valida
-        
+        m_sec  = (df_tram["FECHA FIRMA"] < d_ini) & df_tram["CAIDAS"].between(d_ini, hoy, "both") & mask_valida
+
         sel    = m_col & (m_alta | m_baja | m_inci | m_sec)
         df_fil = df_tram.loc[sel].copy()
         df_fil.insert(0, "INDICE", range(1, len(df_fil) + 1))   # columna numerada
@@ -650,7 +542,7 @@ leyenda = [
     ('🟩 ALTA',       "Firma entre fecha de inicio y fecha fin, sin caída",      'alta'),
     ('🟥 BAJA',       "Caída entre fecha de inicio y fecha fin",                 'baja'),
     ('🟨 INCIDENCIA', "Firma en rango, sin alta ni caída",                      'inci'),
-    ('🟦 CAIDAS CON FIRMA ANTERIOR', "Firma < fecha de inicio y caída entre inicio y hoy",    'sec'),
+    ('🟦 SECUNDARIO', "Firma < fecha de inicio y caída entre inicio y hoy",    'sec'),
 ]
 
 # Estilos base

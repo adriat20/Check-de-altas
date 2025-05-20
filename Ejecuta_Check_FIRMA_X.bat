@@ -50,5 +50,5 @@ if errorlevel 1 (
 explorer "%SCRIPT_DIR%"
 
 echo.
-echo Proceso completado. Pulsa una tecla para salir…
+echo Proceso completado. Pulsa una tecla para salir...
 pause >nul
