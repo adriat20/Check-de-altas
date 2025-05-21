@@ -40,9 +40,9 @@ else:
     hoja = input("📄 ¿Qué mes quieres analizar?: ").strip().upper()
     SHEETS = [hoja]
 
-PLANES    = ["2,0 TD_1", "2,0 TD_2", "2,0 TD_3", "3,0 TD"]
+PLANES = ["2,0 TD_1", "2,0 TD_2", "2,0 TD_3", "3,0 TD", "GAS"]
 SERVS     = {"PIH":["PIH"], "PEH+":["PEH+"], "UUEEn/UUEE":["UUEEN","UUEE"], "PTG":["PTG"]}
-OFERTA    = "EXCLUSIVO 10% TF/TV"
+#OFERTA    = "EXCLUSIVO 10% TF/TV"
 
 # -------------- HELPERS -----------------------------------------------------
 def contains(series: pd.Series, toks: list[str]):
@@ -322,11 +322,12 @@ for p in PLANES:
         BAJAS[BAJAS["PLAN"].str.startswith(p,na=False)],
         SEC_PLAN[SEC_PLAN["PLAN"].str.startswith(p, na=False)]
     )
-add("Plan Exclusivo 10%",
-    ALTAS[contains(ALTAS["OFERTA PRESENTADA"], [OFERTA])],
-    BAJAS[contains(BAJAS["OFERTA PRESENTADA"], [OFERTA])],
-    SEC_PLAN[contains(SEC_PLAN["OFERTA PRESENTADA"], [OFERTA])]
-)
+#add("Plan Exclusivo 10%",
+#    ALTAS[contains(ALTAS["OFERTA PRESENTADA"], [OFERTA])],
+#    BAJAS[contains(BAJAS["OFERTA PRESENTADA"], [OFERTA])],
+#    SEC_PLAN[contains(SEC_PLAN["OFERTA PRESENTADA"], [OFERTA])]
+#)
+
 for k,toks in SERVS.items():
     add(k,
         ALTAS[contains(ALTAS["SERVICIOS"], toks)],
@@ -336,10 +337,59 @@ for k,toks in SERVS.items():
 
 add("ALTAS CON INCIDENCIA", INCID, INCID, INCID.iloc[0:0])
 
-
-
+# -------------- TOTAL_GLOBAL ---------------------------------------------------
 total_global = pd.DataFrame(rows)
-print(total_global[["TIPO","ALTAS","BAJAS"]])
+# --- TOTALES BÁSICOS ---------------------------------------------------
+
+planes_energia = ["2,0 TD_1", "2,0 TD_2", "2,0 TD_3", "3,0 TD", "GAS"]
+df_planes = total_global[total_global["TIPO"].isin(planes_energia)]
+
+tot = {
+    "TIPO": "TOTAL",
+    "ALTAS":               df_planes["ALTAS"].sum(),          # suma planes energía
+    "BAJAS":               df_planes["BAJAS"].sum(),
+    "CAIDAS_FECHA_PASADA": df_planes["CAIDAS_FECHA_PASADA"].sum(),
+    "NO_ASTURIAS":         df_planes["NO_ASTURIAS"].sum(),
+}
+tot["TOTALES"] = (
+      tot["ALTAS"]
+    - tot["BAJAS"]
+    - tot["CAIDAS_FECHA_PASADA"]
+    - tot["NO_ASTURIAS"]
+)
+
+# --- NETOS POR SEDE (ALTAS + INCID – BAJAS) -----------------------------
+def neto_sede(sede, filtro):
+    altas  = df_planes[f"ALTAS_{sede}"].sum()            # ALTAS de los 5 planes
+    bajas  = df_planes[f"BAJAS_{sede}"].sum()            # BAJAS de los 5 planes
+    incid  = INCID[filtro(INCID)].shape[0]               # altas con incidencia en esa sede
+    return altas + incid - bajas                         # lógica solicitada
+
+tot["ALTAS_LENA"]   = neto_sede("LENA",   is_lena)
+tot["ALTAS_MIERES"] = neto_sede("MIERES", is_mieres)
+tot["ALTAS_PYMES"]  = neto_sede("PYMES",  is_pymes)
+
+# columnas de BAJAS_* quedan vacías (solo tienen sentido en las filas de detalle)
+tot["BAJAS_LENA"] = tot["BAJAS_MIERES"] = tot["BAJAS_PYMES"] = ""
+
+
+# ── inserta la fila ───────────────────────────
+
+total_global = pd.concat([total_global, pd.DataFrame([tot])],
+                         ignore_index=True)
+
+# ——— ORDENA las filas según el orden deseado ———
+orden = [
+    "2,0 TD_1", "2,0 TD_2", "2,0 TD_3", "3,0 TD", "GAS",
+    "TOTAL",     
+    "PIH", "PEH+", "UUEEn/UUEE", "PTG", "ALTAS CON INCIDENCIA"
+]
+total_global["TIPO"] = pd.Categorical(total_global["TIPO"],
+                                      categories=orden, ordered=True)
+total_global = total_global.sort_values("TIPO").reset_index(drop=True)
+
+
+
 
 # -------------- POR_COLAB ---------------------------------------------------
 
@@ -376,14 +426,14 @@ serv_baj = (
     }))
 )
 
-of_alt = (ALTAS[contains(ALTAS["OFERTA PRESENTADA"],[OFERTA])]
-          .groupby("COLABORADOR").size().to_frame(f"OFERTA_{OFERTA}_ALTA"))
-of_baj = (BAJAS[contains(BAJAS["OFERTA PRESENTADA"],[OFERTA])]
-          .groupby("COLABORADOR").size().to_frame(f"OFERTA_{OFERTA}_CAIDA"))
+#of_alt = (ALTAS[contains(ALTAS["OFERTA PRESENTADA"],[OFERTA])]
+#          .groupby("COLABORADOR").size().to_frame(f"OFERTA_{OFERTA}_ALTA"))
+#of_baj = (BAJAS[contains(BAJAS["OFERTA PRESENTADA"],[OFERTA])]
+#          .groupby("COLABORADOR").size().to_frame(f"OFERTA_{OFERTA}_CAIDA"))
 
 por_colab = (plan_alt.join(plan_baj,how="outer")
-                     .join(of_alt,how="outer")
-                     .join(of_baj,how="outer")
+ #                    .join(of_alt,how="outer")
+ #                    .join(of_baj,how="outer")
                      .join(serv_alt,how="outer")
                      .join(serv_baj,how="outer")
                      .fillna(0).astype(int))
@@ -399,6 +449,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
     total_global.to_excel(writer, sheet_name="TOTAL_GLOBAL",   index=False)
 print(f"💾 {out}")
 
+# -------------- FORMAT ------------------------------------------------------
 # -------------- FORMAT ------------------------------------------------------
 try:
     wb = load_workbook(out)
@@ -419,6 +470,7 @@ fills = {
     "title": PatternFill("solid", fgColor="FBE4D5"),
     "total": PatternFill("solid", fgColor="BDD7EE"),
     "leyenda": PatternFill("solid", fgColor="FFF599"),  # Amarillo específico para leyenda
+    "total_full": PatternFill("solid", fgColor="FFEB9C")  # Amarillo más intenso para fila TOTAL
 }
 fonts = {"head":Font(bold=True), "title":Font(bold=True, size=12)}
 align = Alignment(horizontal="center", vertical="center")
@@ -437,6 +489,7 @@ for sh in ["POR_COLABORADOR","TOTAL_GLOBAL"]:
     # Formatear encabezados
     for c in ws[2]:
         c.fill, c.font, c.alignment, c.border = fills["head"], fonts["head"], align, border
+    header = [cell.value for cell in ws[2]]
 
     # Formatear datos (excluyendo la leyenda)
     if sh == "TOTAL_GLOBAL":
@@ -466,7 +519,6 @@ for sh in ["POR_COLABORADOR","TOTAL_GLOBAL"]:
         bottom=Side(style="thin")
         )
         col_span = ws.max_column
-
 
         # Aplicar formato a la leyenda
         for i, text in enumerate(legend_lines):
@@ -498,35 +550,67 @@ for sh in ["POR_COLABORADOR","TOTAL_GLOBAL"]:
     else:
         max_data_row = ws.max_row
 
-    # Aplicar formato solo a las filas de datos (excluyendo leyenda)
+    # ----------------------------------------------------------
+    # Formateo de cada fila de datos
     for row_cells in ws.iter_rows(min_row=3, max_row=max_data_row):
-        first = row_cells[0].value
-        if first is None:
+        primera_celda = row_cells[0].value
+        if primera_celda is None:
             continue
-        tipo = first
+
+        # ---------- ajustes comunes ----------
         for c in row_cells:
             c.alignment, c.border = align, border
-            if sh == "POR_COLABORADOR":
-                c.fill = fills["alta"] if "_ALTA" in str(row_cells[0].value) else fills["baja"]
-            else:
-                hdr_txt = ws.cell(row=2, column=c.column).value
-                if hdr_txt == "TOTALES":
+
+        # ---------- color según hoja ----------
+        if sh == "POR_COLABORADOR":
+            # Si el indicador contiene "_ALTA" → verde, en otro caso rojo (incluyendo PTG)
+            color = "alta" if "_ALTA" in str(primera_celda) else "baja"
+            for c in row_cells:
+                c.fill = fills[color]
+        else:  # hoja TOTAL_GLOBAL
+            for c in row_cells:
+                cabecera = ws.cell(row=2, column=c.column).value
+                if primera_celda == "TOTAL":
+                    c.fill = fills["total_full"]
+                    c.font = Font(bold=True)
+                elif cabecera == "TOTALES":
                     c.fill = fills["total"]
-                elif tipo == "ALTAS CON INCIDENCIA":
+                elif primera_celda == "ALTAS CON INCIDENCIA":
                     c.fill = fills["inci"]
-                elif hdr_txt and hdr_txt.startswith("ALTAS_"):
+                elif cabecera and cabecera.startswith("ALTAS_"):
                     c.fill = fills["alta_loc"]
-                elif hdr_txt and hdr_txt.startswith("BAJAS_"):
+                elif cabecera and cabecera.startswith("BAJAS_"):
                     c.fill = fills["baja"]
-              
-    
+    # ---------------- fin del for row_cells -------------------
+
+    # ► fusiona ALTAS/BAJAS de cada sede en la fila TOTAL
+    if sh == "TOTAL_GLOBAL":
+        fila_total = None
+        for row in ws.iter_rows(min_row=3, max_row=ws.max_row):
+            if row[0].value == "TOTAL":
+                fila_total = row[0].row
+                break
+                
+        if fila_total:
+            # Fusionar celdas de cada sede
+            for col_a, col_b in [("ALTAS_LENA", "BAJAS_LENA"),
+                                 ("ALTAS_MIERES", "BAJAS_MIERES"),
+                                 ("ALTAS_PYMES", "BAJAS_PYMES")]:
+                if col_a in header and col_b in header:
+                    i_a = header.index(col_a) + 1
+                    i_b = header.index(col_b) + 1
+                    ws.merge_cells(start_row=fila_total, start_column=i_a,
+                                   end_row=fila_total, end_column=i_b)
+                    ws.cell(row=fila_total, column=i_a).alignment = align
+                    ws.cell(row=fila_total, column=i_a).fill = fills["total_full"]
 
     auto_width(ws)
-    
+
     if sh == "TOTAL_GLOBAL":
-        max_allowed = 25
-        if ws.column_dimensions['A'].width > max_allowed:
-            ws.column_dimensions['A'].width = max_allowed
+            max_allowed = 25
+            if ws.column_dimensions['A'].width > max_allowed:
+                ws.column_dimensions['A'].width = max_allowed
+
 
 wb.save(out)
 
